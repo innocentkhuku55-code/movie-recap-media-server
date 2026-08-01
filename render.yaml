@@ -1,1 +1,10 @@
+services:
+  - type: web
+    name: movie-recap-media-server
+    env: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: STORAGE_DIR
+        value: /tmp/media-server
 
