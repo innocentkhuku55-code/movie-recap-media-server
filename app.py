@@ -19,6 +19,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Form, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
+import base64
+import requests
 import yt_dlp
 from gtts import gTTS
 
@@ -26,6 +28,8 @@ app = FastAPI(title="movie-recap-media-server")
 
 STORAGE_DIR = Path(os.environ.get("STORAGE_DIR", "/tmp/media-server"))
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+GOOGLE_TTS_API_KEY = os.environ.get("GOOGLE_TTS_API_KEY", "")
 
 # How long a source_id's downloaded video is kept before cleanup (seconds).
 MAX_AGE_SECONDS = 60 * 60 * 2  # 2 hours
@@ -131,7 +135,7 @@ def ingest(payload: dict):
 @app.post("/tts")
 def tts(payload: dict):
     text = (payload or {}).get("text", "").strip()
-    # voice param kept for API compatibility; gTTS only takes a language code.
+    voice_name = (payload or {}).get("voice", "my-MM-Standard-A")
     lang = (payload or {}).get("lang", "my")
     if not text:
         raise HTTPException(status_code=400, detail="Missing 'text'")
@@ -139,16 +143,47 @@ def tts(payload: dict):
     tmp_id = uuid.uuid4().hex[:12]
     out_path = STORAGE_DIR / f"tts-{tmp_id}.mp3"
 
-    try:
-        speech = gTTS(text=text, lang=lang)
-        speech.save(str(out_path))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"gTTS failed: {e}")
+    if GOOGLE_TTS_API_KEY:
+        try:
+            resp = requests.post(
+                f"https://texttospeech.googleapis.com/v1/text:synthesize?key={GOOGLE_TTS_API_KEY}",
+                json={
+                    "input": {"text": text},
+                    "voice": {"languageCode": "my-MM", "name": voice_name},
+                    "audioConfig": {"audioEncoding": "MP3"},
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            audio_b64 = resp.json().get("audioContent")
+            if not audio_b64:
+                raise ValueError(f"No audioContent in response: {resp.text[:300]}")
+            out_path.write_bytes(base64.b64decode(audio_b64))
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Google Cloud TTS failed: {e}")
+    else:
+        # Fallback: gTTS (lower quality, but needs no API key).
+        try:
+            speech = gTTS(text=text, lang=lang)
+            speech.save(str(out_path))
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"gTTS failed: {e}")
 
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise HTTPException(status_code=502, detail="TTS produced no audio")
 
     return FileResponse(str(out_path), media_type="audio/mpeg", filename="voice.mp3")
+
+
+def _get_duration_seconds(path: Path) -> float:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True, timeout=30
+    )
+    try:
+        return max(1.0, float(result.stdout.strip()))
+    except (ValueError, AttributeError):
+        return 30.0  # fallback if ffprobe fails to report duration
 
 
 @app.post("/compose")
@@ -168,6 +203,8 @@ def compose(source_id: str = Form(...), title: str = Form(""), audio: UploadFile
     # scale/crop to 9:16 vertical for Reels, burn in a simple title card via drawtext.
     safe_title = re.sub(r"[\"':]", "", title)[:120]
 
+    audio_duration = _get_duration_seconds(audio_path)
+
     filter_complex = (
         "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
         "crop=720:1280,"
@@ -178,11 +215,11 @@ def compose(source_id: str = Form(...), title: str = Form(""), audio: UploadFile
 
     cmd = [
         "ffmpeg", "-y",
-        "-i", str(video_path),
+        "-stream_loop", "-1", "-i", str(video_path),
         "-i", str(audio_path),
         "-filter_complex", filter_complex,
         "-map", "[v]", "-map", "1:a",
-        "-shortest",
+        "-t", str(audio_duration),
         "-threads", "1",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
         "-c:a", "aac", "-b:a", "128k",
