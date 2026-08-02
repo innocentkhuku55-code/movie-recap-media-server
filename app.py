@@ -20,7 +20,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Form, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
 import yt_dlp
-import edge_tts
+from gtts import gTTS
 
 app = FastAPI(title="movie-recap-media-server")
 
@@ -129,9 +129,10 @@ def ingest(payload: dict):
 
 
 @app.post("/tts")
-async def tts(payload: dict):
+def tts(payload: dict):
     text = (payload or {}).get("text", "").strip()
-    voice = (payload or {}).get("voice", "my-MM-NilarNeural")
+    # voice param kept for API compatibility; gTTS only takes a language code.
+    lang = (payload or {}).get("lang", "my")
     if not text:
         raise HTTPException(status_code=400, detail="Missing 'text'")
 
@@ -139,10 +140,10 @@ async def tts(payload: dict):
     out_path = STORAGE_DIR / f"tts-{tmp_id}.mp3"
 
     try:
-        communicate = edge_tts.Communicate(text, voice)
-        await communicate.save(str(out_path))
+        speech = gTTS(text=text, lang=lang)
+        speech.save(str(out_path))
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"edge-tts failed: {e}")
+        raise HTTPException(status_code=502, detail=f"gTTS failed: {e}")
 
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise HTTPException(status_code=502, detail="TTS produced no audio")
