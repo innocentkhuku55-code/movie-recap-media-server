@@ -3,4 +3,9 @@ uvicorn[standard]==0.30.6
 yt-dlp==2024.10.7
 gTTS==2.5.4
 requests==2.32.3
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.4.1+cpu
+transformers==4.45.2
+scipy==1.14.1
+sentencepiece==0.2.0
 python-multipart==0.0.9
