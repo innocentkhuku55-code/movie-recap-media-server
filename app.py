@@ -197,7 +197,24 @@ def compose(source_id: str = Form(...), title: str = Form(""), audio: UploadFile
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise HTTPException(status_code=502, detail="ffmpeg produced no output")
 
-    return FileResponse(str(out_path), media_type="video/mp4", filename="recap.mp4")
+    # Return a path (not the raw file) so a pull-based uploader (e.g. Facebook's
+    # video_reels file_url upload) can fetch it via GET /files/{source_id}/final.mp4.
+    return JSONResponse({
+        "ok": True,
+        "source_id": source_id,
+        "video_path": f"/files/{source_id}/final.mp4",
+        "size_bytes": out_path.stat().st_size,
+    })
+
+
+@app.get("/files/{source_id}/{filename}")
+def serve_file(source_id: str, filename: str):
+    safe_name = os.path.basename(filename)
+    file_path = _source_dir(source_id) / safe_name
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found or expired")
+    media_type = "video/mp4" if safe_name.endswith(".mp4") else "application/octet-stream"
+    return FileResponse(str(file_path), media_type=media_type, filename=safe_name)
 
 
 if __name__ == "__main__":
