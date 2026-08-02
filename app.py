@@ -24,6 +24,30 @@ import requests
 import yt_dlp
 from gtts import gTTS
 
+_mms_model = None
+_mms_tokenizer = None
+
+
+def _load_mms():
+    """Lazy-load Meta's MMS-TTS Burmese neural voice model (no API key needed)."""
+    global _mms_model, _mms_tokenizer
+    if _mms_model is None:
+        import torch  # noqa: F401 (import kept local so app boots even if torch isn't installed yet)
+        from transformers import VitsModel, AutoTokenizer
+        _mms_tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-mya")
+        _mms_model = VitsModel.from_pretrained("facebook/mms-tts-mya")
+    return _mms_model, _mms_tokenizer
+
+
+def _synthesize_mms(text: str, out_path: Path):
+    import torch
+    import scipy.io.wavfile
+    model, tokenizer = _load_mms()
+    inputs = tokenizer(text, return_tensors="pt")
+    with torch.no_grad():
+        output = model(**inputs).waveform
+    scipy.io.wavfile.write(str(out_path), rate=model.config.sampling_rate, data=output.squeeze().cpu().numpy())
+
 app = FastAPI(title="movie-recap-media-server")
 
 STORAGE_DIR = Path(os.environ.get("STORAGE_DIR", "/tmp/media-server"))
@@ -137,13 +161,27 @@ def tts(payload: dict):
     text = (payload or {}).get("text", "").strip()
     voice_name = (payload or {}).get("voice", "my-MM-Standard-A")
     lang = (payload or {}).get("lang", "my")
+    engine = (payload or {}).get("engine", "mms")  # mms | google | gtts
     if not text:
         raise HTTPException(status_code=400, detail="Missing 'text'")
 
     tmp_id = uuid.uuid4().hex[:12]
-    out_path = STORAGE_DIR / f"tts-{tmp_id}.mp3"
+    mp3_path = STORAGE_DIR / f"tts-{tmp_id}.mp3"
+    errors = []
 
-    if GOOGLE_TTS_API_KEY:
+    if engine in ("mms", "auto"):
+        wav_path = STORAGE_DIR / f"tts-{tmp_id}.wav"
+        try:
+            _synthesize_mms(text, wav_path)
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", str(wav_path), "-codec:a", "libmp3lame", "-qscale:a", "2", str(mp3_path)],
+                capture_output=True, text=True, timeout=60, check=True,
+            )
+            wav_path.unlink(missing_ok=True)
+        except Exception as e:
+            errors.append(f"mms: {e}")
+
+    if not mp3_path.exists() and GOOGLE_TTS_API_KEY:
         try:
             resp = requests.post(
                 f"https://texttospeech.googleapis.com/v1/text:synthesize?key={GOOGLE_TTS_API_KEY}",
@@ -158,21 +196,21 @@ def tts(payload: dict):
             audio_b64 = resp.json().get("audioContent")
             if not audio_b64:
                 raise ValueError(f"No audioContent in response: {resp.text[:300]}")
-            out_path.write_bytes(base64.b64decode(audio_b64))
+            mp3_path.write_bytes(base64.b64decode(audio_b64))
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Google Cloud TTS failed: {e}")
-    else:
-        # Fallback: gTTS (lower quality, but needs no API key).
+            errors.append(f"google: {e}")
+
+    if not mp3_path.exists():
         try:
             speech = gTTS(text=text, lang=lang)
-            speech.save(str(out_path))
+            speech.save(str(mp3_path))
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"gTTS failed: {e}")
+            errors.append(f"gtts: {e}")
 
-    if not out_path.exists() or out_path.stat().st_size == 0:
-        raise HTTPException(status_code=502, detail="TTS produced no audio")
+    if not mp3_path.exists() or mp3_path.stat().st_size == 0:
+        raise HTTPException(status_code=502, detail=f"All TTS engines failed: {'; '.join(errors)}")
 
-    return FileResponse(str(out_path), media_type="audio/mpeg", filename="voice.mp3")
+    return FileResponse(str(mp3_path), media_type="audio/mpeg", filename="voice.mp3")
 
 
 def _get_duration_seconds(path: Path) -> float:
@@ -204,6 +242,7 @@ def compose(source_id: str = Form(...), title: str = Form(""), audio: UploadFile
     safe_title = re.sub(r"[\"':]", "", title)[:120]
 
     audio_duration = _get_duration_seconds(audio_path)
+    output_duration = audio_duration / 1.15  # narration is sped up 1.15x below
 
     filter_complex = (
         "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
@@ -217,9 +256,9 @@ def compose(source_id: str = Form(...), title: str = Form(""), audio: UploadFile
         "ffmpeg", "-y",
         "-stream_loop", "-1", "-i", str(video_path),
         "-i", str(audio_path),
-        "-filter_complex", filter_complex,
-        "-map", "[v]", "-map", "1:a",
-        "-t", str(audio_duration),
+        "-filter_complex", filter_complex + ";[1:a]atempo=1.15[a]",
+        "-map", "[v]", "-map", "[a]",
+        "-t", str(output_duration),
         "-threads", "1",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
         "-c:a", "aac", "-b:a", "128k",
