@@ -70,7 +70,7 @@ def ingest(payload: dict):
 
     ydl_opts = {
         "outtmpl": str(video_path.with_suffix("")) + ".%(ext)s",
-        "format": "bv*[height<=1080]+ba/b[height<=1080]/best",
+        "format": "bv*[height<=720]+ba/b[height<=720]/best",
         "merge_output_format": "mp4",
         "writesubtitles": True,
         "writeautomaticsub": True,
@@ -169,10 +169,10 @@ def compose(source_id: str = Form(...), title: str = Form(""), audio: UploadFile
     safe_title = re.sub(r"[\"':]", "", title)[:120]
 
     filter_complex = (
-        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,"
-        f"drawtext=text='{safe_title}':fontcolor=white:fontsize=48:"
-        "box=1:boxcolor=black@0.5:boxborderw=12:x=(w-text_w)/2:y=80:"
+        "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
+        "crop=720:1280,"
+        f"drawtext=text='{safe_title}':fontcolor=white:fontsize=32:"
+        "box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=60:"
         "enable='between(t,0,4)'[v]"
     )
 
@@ -183,8 +183,9 @@ def compose(source_id: str = Form(...), title: str = Form(""), audio: UploadFile
         "-filter_complex", filter_complex,
         "-map", "[v]", "-map", "1:a",
         "-shortest",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "192k",
+        "-threads", "1",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+        "-c:a", "aac", "-b:a", "128k",
         str(out_path),
     ]
 
