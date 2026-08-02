@@ -2,4 +2,5 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 yt-dlp==2024.10.7
 gTTS==2.5.4
+requests==2.32.3
 python-multipart==0.0.9
